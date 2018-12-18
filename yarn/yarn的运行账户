@@ -11,9 +11,9 @@ CM启用静态资源池时
 始终使用 Linux Container Executor yarn.nodemanager.container-executor.class 未true。
 
 此时，container运行账户为任务的提交用户，而非nodemanager的运行账户yarn，安全模式下是如此，但是，在飞安全模式下，通过设置参数，可以统一指定container的运行账户为nobody。
-设置参数Limit Nonsecure Container Executor Users 为true，可以统一指定非安全模式下container的运行账户为Limit Nonsecure Container Executor Users
+设置参数Limit Nonsecure Container Executor Users 为true，可以统一指定非安全模式下container的运行账户为yarn.nodemanager.linux-container-executor.nonsecure-mode.local-user
 指定的账户；
-默认情况下，参数Limit Nonsecure Container Executor Users 指定的用户为nobody；
+默认情况下，参数yarn.nodemanager.linux-container-executor.nonsecure-mode.local-user指定的用户为nobody；
 
 
 
