@@ -1,0 +1,12 @@
+
+yarn启动Nodemanager时有yarn这个超级账户完成的，所以nodemanager的运行账户默认为Yarn；
+
+yarn运行container是有两种运行账户选择策略。默认情况下，NodeManager 使用 DefaultContainerExecutor 以 NodeManager 启动者的身份来执行启动Container等操作，安全性低且没有任何CPU资源隔离机制。
+而当启用了CGroup之后，必须要使用 LinuxContainerExecutor达到资源隔离的目的；
+
+CM启用静态资源池时
+会设置参数
+将 CGroups 用于资源管理yarn.nodemanager.linux-container-executor.resources-handler.class 为true启用CG。
+同时指定Container的运行账户为LinuxContainerExecutor，也即设置参数
+始终使用 Linux Container Executor yarn.nodemanager.container-executor.class 未true。
+
