@@ -27,3 +27,14 @@ shuffle write，而将 reducer 读入数据、aggregate 数据的过程称为 sh
 中加入 shuffle write 和 shuffle read 的处理逻辑？以及两个处理逻辑应该怎么高效实现？ Shuffle write由于不要求数据有序，shuffle write 的
 任务很简单：将数据 partition 好，并持久化。之所以要持久化，一方面是要减少内存存储空间压力，另一方面也是为了 fault-tolerance。
 
+4、Spark程序执行，有时候默认为什么会产生很多task，怎么修改默认task执行个数？
+1）因为输入数据有很多task，尤其是有很多小文件的时候，有多少个输入block就会有多少个task启动；
+2）spark中有partition的概念，每个partition都会对应一个task，task越多，在处理大规模数据的时候，就会越有效率。不过task并不是越多越好，
+如果平时测试，或者数据量没有那么大，则没有必要task数量太多。
+3）参数可以通过spark_home/conf/spark-default.conf配置文件设置:spark.sql.shuffle.partitions 50 spark.default.parallelism 10第一个是针对
+spark sql的task数量第二个是非spark sql程序设置生效；
+
+5、rdd有几种操作类型？
+1）transformation，rdd由一种转为另一种rdd
+2）action，
+3）cronroller，crontroller是控制算子,cache,persist，对性能和效率的有很好的支持。
