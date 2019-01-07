@@ -1,0 +1,225 @@
+Impala内存分配评估过程源码分析
+参考文档：
+http://www.stay-stupid.com/?p=332
+
+正文：
+ImpalaSQL 由Client的Beeswax 接口 BeeswaxService.query()提交到ImpalaServer端，
+通过调用void ImpalaServer::query(QueryHandle& query_handle, const Query& query)最终将SQL转化为Query_ctx后提交给Frontend执行。
+
+Frontend入口是TExecRequest createExecRequest(TQueryCtx queryCtx, StringBuilder explainString)，这个方法的主要作用是解析SQL，产生AnalyticResult以及包含所有SQL信息的Analyzer对象，在将分析结果转化为执行计划，大致为产生单节点的计划以及分布式的执行计划。  分布式的执行计划包含了所有的执行信息，封装在了Fragment中，分布式的执行计划是一个有依赖关系的Fragment列表。
+
+SQL处理大致的过程如下：
+Query_ctx-->analysisResult-->TExecrequest-->TQueryExecrequest-->Framents
+上述过程主要发生在Frontend.java类中，执行资源的评估与分配发生在Framents初始化之后之后，共分为两个步骤：
+public TExecRequest createExecRequest(TQueryCtx queryCtx, StringBuilder explainString)
+...
+Planner planner = new Planner(analysisResult, queryCtx, timeline);
+     （步骤一）TQueryExecRequest queryExecRequest = createExecRequest(planner, explainString);
+...
+// Override the per_host_mem_estimate sent to the backend if needed. The explain
+    // string is already generated at this point so this does not change the estimate
+// shown in the plan.
+   （步骤二） checkAndOverrideMemEstimate(queryExecRequest, queryOptions);
+内存评估发生在初始化TQueryExecRequest的过程中，之后会根据设置进行对比，确认评估值不超过设置的内存配置上限。
+
+步骤一：内存初始化分配
+对于Query类型的SQL，在创建TQueryExecRequest时初始化（createExecRequest（...））了各个Host的内存设置。
+主要代码如下：
+private TQueryExecRequest createExecRequest(
+      Planner planner, StringBuilder explainString) throws ImpalaException {
+...
+planRoots.add(planner.createPlan().get(0));
+...
+planner.computeResourceReqs(planRoots, queryCtx, result);
+先调用planner.createPlan()将分析的结果Analyzer转化为转化为执行计划，实际中先生成单节点的执行计划，在转化为分布式的执行计划，计划生成后调用接口对所有的Fragment 内存进行计算。接口为planner.computeResourceReqs(planRoots, queryCtx, result)。
+在planner中代码如下：
+public class Planner {
+...
+  public void computeResourceReqs(List<PlanFragment> planRoots,
+      TQueryCtx queryCtx, TQueryExecRequest request) {
+    ...
+    ResourceProfile maxPerHostPeakResources = ResourceProfile.invalid();
+
+    // Do a pass over all the fragments to compute resource profiles. Compute the
+    // profiles bottom-up since a fragment's profile may depend on its descendants.
+    List<PlanFragment> allFragments = planRoots.get(0).getNodesPostOrder();
+    for (PlanFragment fragment: allFragments) {
+      // Compute the per-node, per-sink and aggregate profiles for the fragment.
+      fragment.computeResourceProfile(ctx_.getRootAnalyzer());
+      maxPerHostPeakResources = maxPerHostPeakResources.sum(
+          fragment.getResourceProfile().multiply(fragment.getNumInstancesPerHost(mtDop)));
+    }
+
+    Preconditions.checkState(maxPerHostPeakResources.getMemEstimateBytes() >= 0,
+        maxPerHostPeakResources.getMemEstimateBytes());
+    Preconditions.checkState(maxPerHostPeakResources.getMinReservationBytes() >= 0,
+        maxPerHostPeakResources.getMinReservationBytes());
+
+    maxPerHostPeakResources = MIN_PER_HOST_RESOURCES.max(maxPerHostPeakResources);
+
+    // TODO: Remove per_host_mem_estimate from the TQueryExecRequest when AC no longer
+    // needs it.
+    request.setPer_host_mem_estimate(maxPerHostPeakResources.getMemEstimateBytes());
+    request.setMax_per_host_min_reservation(
+        maxPerHostPeakResources.getMinReservationBytes());
+    if (LOG.isTraceEnabled()) {
+      LOG.trace("Max per-host min reservation: " +
+          maxPerHostPeakResources.getMinReservationBytes());
+      LOG.trace("Max estimated per-host memory: " +
+          maxPerHostPeakResources.getMemEstimateBytes());
+    }
+  }
+其中MIN_PER_HOST_RESOURCES设置的默认预估内存为10M，reservation为0；
+从代码可以看到，单个Host的估计内存是将所有的Fragment的单个节点的预估内存相加得到的，同时不得低于默认值。
+Fragment在单个节点内存预估值为每个instance的预估值与实例数的乘积：
+fragment.getResourceProfile().multiply(fragment.getNumInstancesPerHost(mtDop)；
+
+Fragment的内存计算过程如下：
+org/apache/impala/planner/PlanFragment.java：
+  public void computeResourceProfile(Analyzer analyzer) {
+...
+ExecPhaseResourceProfiles planTreeProfile =
+        planRoot_.computeTreeResourceProfiles(analyzer.getQueryOptions());
+    // The sink is opened after the plan tree.
+    ResourceProfile fInstancePostOpenProfile =
+        planTreeProfile.postOpenProfile.sum(sink_.getResourceProfile());
+resourceProfile_ = new ResourceProfileBuilder()
+        .setMemEstimateBytes(runtimeFiltersReservationBytes_)
+        .setMinReservationBytes(runtimeFiltersReservationBytes_).build()
+        .sum(planTreeProfile.duringOpenProfile.max(fInstancePostOpenProfile));
+...
+initialReservationTotalClaims_ = sink_.getResourceProfile().getMinReservationBytes() +
+        runtimeFiltersReservationBytes_;
+    for (PlanNode node: collectPlanNodes()) {
+      initialReservationTotalClaims_ +=
+          node.getNodeResourceProfile().getMinReservationBytes();
+    }
+}
+Fragment的内存有三部分组成：Sink、Node以及RuntimeFilter；
+初始化的内存为三者的Reservation内存之和；
+计算peak内存峰值，首先要计算执行树的内存：planTreeProfile（包含两部分：duringOpenProfile；postOpenProfile），之后计算Sink的内存消耗，并叠加：fInstancePostOpenProfile= planTreeProfile.postOpenProfile+sink_.getResourceProfile()
+resourceProfile_ 等于已经相加了sink内存的计划树postOpenprofile 与计划树duringOpenprofile的较大值，在累加setMemEstimateBytes(runtimeFiltersReservationBytes_)以及setMinReservationBytes(runtimeFiltersReservationBytes_).build()，实际上是加了runtimefilter的内存。
+计划树两种内存的解释如下：
+/** Peak resources consumed while Open() is executing for this subtree */
+    public final ResourceProfile duringOpenProfile;
+
+    /**
+     * Peak resources consumed for this subtree from the time when ExecNode::Open()
+     * returns until the time when ExecNode::Close() returns.
+     */
+public final ResourceProfile postOpenProfile;
+
+到此，Fragment内存的计划，分为三个部分：
+1）计算Sink的内存估计；
+2）计算runtimefilter的内存估计；
+3）计算执行树的两种内存估计；
+PlanNode.java中执行树的内存估计如下：
+public ExecPhaseResourceProfiles computeTreeResourceProfiles(){...}
+执行树中有两类节点：isBlockingNode和StreamingNode。
+BlockNode；
+// This does not consume resources until after child's Open() returns. The child is
+// then closed before Open() of this node returns.
+ ResourceProfile duringOpenProfile = childResources.duringOpenProfile.max(
+          childResources.postOpenProfile.sum(nodeResourceProfile_));
+      return new ExecPhaseResourceProfiles(duringOpenProfile, nodeResourceProfile_);
+
+树的duringOpenProfile是子树的duringOpenProfile与子树postOpenProfile叠加当前节点nodeResourceProfile后二者的较大值。
+树的postOpenProfile是当前节点的nodeResourceProfile；
+duringOpenProfile是相邻两个Node中的内存累积和的最大值。
+StreamingNode：
+return new ExecPhaseResourceProfiles(
+          childResources.duringOpenProfile.sum(nodeResourceProfile_),
+          childResources.postOpenProfile.sum(nodeResourceProfile_));
+所有节点的nodeResourceProfile内存累加值。
+nodeResourceProfile计算规则依赖于节点的实现，不同的Node节点有不同的规则。实现方法为：
+public void computeNodeResourceProfile(TQueryOptions queryOptions){}；
+
+比如HDFSScanNode，node的内存计算过程如下：
+先计算perHostScanRanges，计算内个节点读取数据Block的列表；
+计算maxScannerThreads，内个节点的最大并发线程；
+计算avgScanRangeBytes，每个文件块的平均大小；
+这里的scanranges是需要读取的Block序列；
+
+  int maxScannerThreads;
+    if (queryOptions.getMt_dop() >= 1) {
+      maxScannerThreads = 1;
+    } else {
+      maxScannerThreads = Math.min(perHostScanRanges, RuntimeEnv.INSTANCE.getNumCores());
+      // Account for the max scanner threads query option.
+      if (queryOptions.isSetNum_scanner_threads() &&
+          queryOptions.getNum_scanner_threads() > 0) {
+        maxScannerThreads =
+            Math.min(maxScannerThreads, queryOptions.getNum_scanner_threads());
+      }
+    }
+avgScanRangeBytes = (long) Math.ceil(totalBytes_ / (double) scanRanges_.size());计算每个Block的均值。
+perThreadIoBuffers = 
+Math.min((long) Math.ceil(avgScanRangeBytes / (double) readSize),
+            MAX_IO_BUFFERS_PER_THREAD) + 1;
+perThreadIoBuffers每个线程使用IObuffer的次数，默认最大上限为MAX_IO_BUFFERS_PER_THREAD=10;
+perInstanceMemEstimate = checkedMultiply(
+        checkedMultiply(maxScannerThreads, perThreadIoBuffers), readSize);
+perInstanceMemEstimate节点实例内存估计为三者的乘积：最大访问线程数，buffer
+次数以及单次读取的数据量。
+最后在于上限进行修正，去较小值，上限为：
+return (long) RuntimeEnv.INSTANCE.getNumCores() * (long) MAX_THREAD_TOKENS_PER_CORE *
+	        MAX_IO_BUFFERS_PER_THREAD * BackendConfig.INSTANCE.getReadSize();
+所以，单个HDFSScanNode的内存是有文件块最大并发读取线程，每个线程可用的Buffer的数量，以及单词读取数据量的乘积组成，同时根据其他默认值以及参数值进行修正。
+单个节点内存影响的参数为：
+实例可用的内核数：NumCores；
+默认的单核处理的线程数：MAX_THREAD_TOKENS_PER_CORE=3；
+默认的线程缓冲次数：MAX_IO_BUFFERS_PER_THREAD=10；
+系统单次读取的数据量：readSize；
+每个节点读取的Block数：perHostScanRanges（不能多于内核数）；
+
+Sink 内存估计：
+Sink用于在Fragment结束时将数据发送给先一个Fragment，根据下一个Fragment的种类不同有不同的实现与默认值，如HdfsTableSink.java，用于写数据到HDFS。实现代码如下：
+public void computeResourceProfile(TQueryOptions queryOptions) {
+    FeFsTable table = (FeFsTable) targetTable_;
+    HdfsFileFormat format = table.getMajorityFormat();
+    PlanNode inputNode = fragment_.getPlanRoot();
+    int numInstances = fragment_.getNumInstances(queryOptions.getMt_dop());
+    long numPartitionsPerInstance =
+        fragment_.getPerInstanceNdv(queryOptions.getMt_dop(), partitionKeyExprs_);
+    if (numPartitionsPerInstance == -1) {
+      numPartitionsPerInstance = DEFAULT_NUM_PARTITIONS;
+    }
+    long perPartitionMemReq = getPerPartitionMemReq(format);
+
+    long perInstanceMemEstimate;
+    if (inputNode.getCardinality() == -1 || inputNode.getAvgRowSize() == -1) {
+      perInstanceMemEstimate = numPartitionsPerInstance * perPartitionMemReq;
+    } else {
+      long perInstanceInputCardinality =
+          Math.max(1L, inputNode.getCardinality() / numInstances);
+      long perInstanceInputBytes =
+          (long) Math.ceil(perInstanceInputCardinality * inputNode.getAvgRowSize());
+      long perInstanceMemReq =
+          PlanNode.checkedMultiply(numPartitionsPerInstance, perPartitionMemReq);
+      perInstanceMemEstimate = Math.min(perInstanceInputBytes, perInstanceMemReq);
+    }
+    resourceProfile_ = ResourceProfile.noReservation(perInstanceMemEstimate);
+  }
+
+
+实际上，HdfsTableSink的内存是由每个Instance包含的Partition的数量与每个Partition的默认内存相乘后进行修正得到的。partition的默认内存与输出的文件格式相关。
+
+RuntimeFilter：
+过虑器的大小与Fragment中的Node类型高度相关。
+以上是步骤一种对执行计划进行的内存评估过程。
+
+步骤二：对根据任务内容推测的资源配置与客户端设置的资源上限对比，取最小值。
+private void checkAndOverrideMemEstimate(TQueryExecRequest queryExecRequest,
+      TQueryOptions queryOptions) {
+    if (queryOptions.isSetMax_mem_estimate_for_admission()
+        && queryOptions.getMax_mem_estimate_for_admission() > 0) {
+      long effectiveMemEstimate = Math.min(queryExecRequest.getPer_host_mem_estimate(),
+              queryOptions.getMax_mem_estimate_for_admission());
+      queryExecRequest.setPer_host_mem_estimate(effectiveMemEstimate);
+    }
+  }
+参数MAX_MEM_ESTIMATE_FOR_ADMISSION可在运行是指定，生效的条件是：
+1）启用了adminission control；
+2）没有设置query、session、pool、global级别的MEM_LIMIT;
+
+
