@@ -1,1 +1,7 @@
 1 Python 入门
+2 内置函数：
+dir(__duiltins__)查看；
+3 类型转换
+内置函数可以完成str、float、int之间的转换；
+4 类型判断
+内置函数type、isinstance可以判断类型；
