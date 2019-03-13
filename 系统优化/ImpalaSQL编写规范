@@ -1,0 +1,130 @@
+SQL脚本优化建议
+一 SQL规范
+1 规范建表语句
+当需要使用其他表的Schema创建新的表时，不需要数据时，规范建表语句可参考如下模式:
+1)create  table  table_demoA  like  table_name ;
+2)create  table  table_demoB  as  select *  from  table_name limit 0;
+不恰当的用法：
+create  table  table_demo  as  select *  from  table_name limit 1;
+2 谨慎使用Alter
+当使用Alter语句时需要考虑操作是否是必须的。
+如删除字段：
+--alter table table_demo drop column flag;
+如果表table_demo在后续引用时没有类似select * from table_demo的操作，有无flag字段都没有实际的影响，上述删除字段的操作是多余的，可以不执行。
+3慎用Union all 
+虽然Unionall可以将多张表合并，但是有时候，将合并的过程列为单独的SQL过程，显得多余。例如对于如下过程：
+多张表依次单独处理并落地-->结果表合并后再次落地存储-->合并后的表二次处理
+上述过程中的结果表合并落地的过程可以避免，具体的做法是在二次处理的时候，直接通过UnionAll子句读入全部数据。如
+1)create table table_demoA ...
+2)create table table_demoB ...
+3)create table table_unionC  as  select *  from  table_demoA union all  table_demoB;
+4)select *  from table_unionC;
+上述过程中的3)、4)可以合并为如下格式：
+select * from  (select *  from  table_demoA union all  table_demoB);
+或者采用view代替实体表：
+3)create view table_unionC  as  select *  from  table_demoA union all  table_demoB;
+4)select *  from table_unionC;
+
+4 修改表名代替二次写入
+当一张表的数据经过一系列处理后又覆盖写入到这张表中，例如：
+1)create table table_demoA ...
+2)create table table_demoB as  select *  from  table_demoA where … ;
+3)truncate table table_demoA;
+4)insert into table_demoA as  select *  from table_demoB; 
+上述的3)、4)过程建议修改为如下过程：
+drop table table_demoA;
+alter table table_demoB rename to table_demoA;
+5 不必要的处理过程 
+有些SQL过程可以很容易的避免，不需要单独列出来处理，如调整字段顺序：
+1)create table  table_demoA as select  a,b from table_name;
+2)create table  table_demoB as select b,a from table_demoA;
+上述两个过程可以合并为如下语句：
+create table  table_demoB as select b,a from table_name;
+6避免使用SQL关键字
+在Schema中应当避免出现特殊符号或者关键字，如create table table_demoA (sort string);
+sort 是SQL关键字，不建议直接用sort做为字段名称，如果这种情况不能避免，可以添加撇号执行，语句如下：
+create table table_demoA (`sort` string)；
+select `sort` from table_demoA;
+7 特殊方法慎用
+如数据聚合操作，应当避免出现单条数据数据量过大的情况，如：
+create table table_demoA  as select group_concat(a) colle from table_name group by b;
+select *  from table_demoA where  colle like '%***%'
+这里的group_concat会保留所有的数据，没有去重逻辑，所以当分组中数据较多时，上述操作会造成单行结果数据过大，出现数据处理缓慢，甚至内存不足无法正常执行的异常；
+修改建议：
+如果不需要保留相同数据的所有相同版本，可以修改为group_concat(distinct a)，所有相同的值只保留一个版本。
+8标签表使用
+算法包运行时引用了标签表
+不推荐的做法：
+将标签的数据内置到算法包中，每次运行时初始化标签表，算法结束时将标签表删除。
+建议做法：
+如无特殊原因，标签表不需要频繁修改，可以将标签表写入到数据库中，做持久化的表，不需要每次用完后将其删除。
+9 使用View
+写脚本时，为了保证脚本的简洁与可读性，大量的语句被拆分成很多独立的子过程。数据量较大的中间表落地引发的数据的写入与读取过程比较耗时，这种情形下，可以考虑使用View代替部分Table，优化执行过程；Impala中View只是逻辑视图，作用与子查询相当。View能保证脚本的可读性，每调用一次，它所包含的逻辑会被执行一次。同样的，创建View与创建表类似，属于DDL操作，会占用一定的时间。执行调用View的SQL语句，对内存的占用与将View用子查询表示的情形相当，不会额外消耗内存。
+推荐使用的情况：
+1）中间表数据量比较大（千万级），同时此表只调用了一次；
+2）中间表分步的实现多次Join，可以考虑用view代替实体表，但是view相互调用的深度在4~5时建议将数据做落地处理；
+这里的View作用是替代临时表，任务结束后需要及时删除清理。
+不推荐情况：
+1）临时表的数据量较小（数十万条）的情况下，创建实体表与创建View的耗时接近，这种情形下应当直接使用实体表。
+2）临时表数据量较大，但是有复杂的计算过程，如Group，Sort等，这类操作优先使用实体表。
+10 使用子查询 
+对于较为简单的查询，可以考虑使用嵌套的子查询，不推荐将小表拆分出来单独处理。如:
+1) create table table_demoA  as  select *  from table_demoB … ;
+2) select  *  from  table_name  a  join table_demoA  b on …;
+语句比较简单，使用子查询也不会增加理解的难度，可以将上述两句合并：
+select  *  from  table_name  a  join (  select *  from table_demoB …   )  b on …;
+11 多表关联处理
+多表关联的过程，如果将每一步关联单独运行，这样会增加SQL任务的数量，以及实际落地的数据量，影响执行效率。
+Impala SQL中，多表的关联可以放在同一个SQL任务中，典型的如一张大表关联多张小表，或者两张大表的关联。需要注意的是，当大表存在复杂运算如Group，Sort时，在这类运算之后尽量不要做Join操作，可以选择分开执行，将后续的Join过程放在下一条任务。
+12 使用parquet格式 
+实测发现，Impala写入TEXT文件与Parquet文件的耗时相当，但是对于Parquet格式数据，占用硬盘存储空间明显小于TEXT格式，读取时IO压力会降低。对于需要落地的中间表，如果数据量较大（千万级），建议显示的指定用parquet格式存储；如;
+create  table  table_demoA  stored  as  parquet  as  select  *  from table_name;
+
+二 Schema设计
+1 元数据刷新
+Invalidate metadata 使用：
+这个操作是指将Impala缓存的表的元数据删除后重新加载，一般当Impala表的元数据发生变化时需要执行，典型的如在别的Impala节点或者Hive中建表、修改表结构后在当前工作节点刷新。默认情况下此操作刷新所有表的元数据，也可以指定特定的表名，执行过后首次操作某张表时执行都会变慢。 
+推荐使用场景：
+1）元数据发生变化后需要同步的;
+2）使用时指定特定的表，如Invalidate metadata [dbname].[tbname];
+Refresh :
+此操作是轻量级的，在于刷新Impala表的数据文件列表。当Impala的数据文件列表发生变化，典型的如通过Hive load数据到Impala表中，需要在Impala中执行。
+推荐使用场景：
+Impala的表结构信息没有变化，只是数据文件发生变化的情况下，建议使用
+Refresh [dbname].[tbname]; 
+上述两种操作适用于不同的场景，执行只在当前节点生效，其他节点会延迟生效，一般为延迟2s。操作都有一定的耗时，需要谨慎使用。
+2 元数据同步
+合理使用SYNC_DDL：
+由于Impala特殊的分布式设计，当前节点上关于元数据的操作默认2s后才能同步到其他节点上，所以在应用中如果中间间隔短语2s，可能发生元数据没有匹配到的错入，典型的如新建的表在其他节点操作时报表不同在的错误。为了避免这种错误，Impala提供了参数SYNC_DDL，启用时，只有当前的元数据操作都同步到其他节点上后执行才结束。此操作的弊端是当前Session启用此参数后，后续所有的DDL操作都需要同步到其他节点才会结束，执行过程会变慢。
+推荐使用场景：
+启用了负载均衡的提交机制（或者随机），且对同一张表的操作可能通过不同的Session发生在不同的节点上，时间可能短于默认的2s。
+推荐在Session的最后一条DDL之前启用此参数，SYNC_DDL=true，若不上述特殊场景条件，尽量避免使用此参数。
+3 数据类型选择
+字符串：
+对于字符串，优先使用String，而不是Char/Varchar，因为String字段无需定义长度限制，但String值不建议超过1MB，否则会带来Impala性能和稳定性问题。
+数值字段：
+数值字段尽可能使用Number（Int、Decimal、Float、Double）类型，特别是对于分区字段和关联字段。对于有精度要求的而数据类型，优先考虑Decimal类型，而不是Float/Double 。典型的使用场景如财经类的，业界默认都采用decimal；或者有精确计算的要求，如作为关联判决条件，用decimal，而不是double/float。
+Decimal的精度不得低于参加计算的常数精度。如a  decimal（12,3），如果存在计算a*3.1415926，这里的a的精度设计不合理，应当为a decimal(12,7)，与参与计算的常数3.1415926相当。
+如果可能，使用Number类型而不是String类型，因为String意味着更高的内存消耗和更慢的计算速度（和Number比较，String性能下降80%）。例如，对于日期字符串“20180101”，切换成整型20180101。
+时间字段：
+对于时间戳，首先考虑Bigint类型，然后考虑String类型，最后才考虑timestamp。
+日期字段，可以优先选择Into类型，而后考虑String，如对于日期字符串“20180101”，切换成整型20180101。例如将值从“2016-01”转换成201601，并使用Int类型；season、month和day做类似处理
+4 合理使用分区
+Partition分区可以高效的组织数据，允许操作者按分区做删除或者读取操作。但是Impala对分区表写入数据比较缓慢。对于数据量较大（超过一亿条）的表，需要慎重。
+不推荐的场景：
+数据存储格式为Parquet，表比较小或者操作大多是执行全表操作的任务，可以选择不分区； 
+推荐的使用场景:
+表的数据量大，且频繁的需要操作表中的一部分数据，如某一年或者某个国家。分区可以减少不必要的全表操作的次数。选取经常作为过滤条件（时间或者国家等）的字段作为分区字段；需要注意分区粒度，单个分区数据量不要小于256m，单表的分区数不要超过10万。
+对于大数据量的表（十亿条以上），存在全表的操作以及部分数据的处理过程，且二者频率相当。这种情形下，如果只是简单的分区，虽然做局部数据处理时很方便，效率很高，但是在做全表处理时写入性能会很差。可选的做法是：1）大表任然分区，如按国家，后续的处理，按每个国家分区单独处理。2）将大表的数据按国家拆分成多张表存储，数据处理也按国家单独完成。
+Hive中分区可以明显的减少任务的数量，写入数据效率比较高，当某张大表需要Impala和Hive同时操作是时需要仔细考虑分区在二者执行效率差异。
+5 表与数据库
+表和库的数量增加，会增加Impala本身的资源（主要是内存）消耗，同时类似数据刷新的操作会更耗时。
+推荐参数：
+Impala中数据库不要超过100个；每个库中的表上限不超过10000个；单个表的partition数量上限不超过10000个；所有库中的Partition数量不超过100000个。
+如果实际数据超过了上述阈值，建议考虑结合业务过程重新设计表与分区模式。
+
+
+
+
+
+
