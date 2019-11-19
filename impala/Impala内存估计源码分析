@@ -6,7 +6,9 @@ http://www.stay-stupid.com/?p=332
 ImpalaSQL 由Client的Beeswax 接口 BeeswaxService.query()提交到ImpalaServer端，
 通过调用void ImpalaServer::query(QueryHandle& query_handle, const Query& query)最终将SQL转化为Query_ctx后提交给Frontend执行。
 
-Frontend入口是TExecRequest createExecRequest(TQueryCtx queryCtx, StringBuilder explainString)，这个方法的主要作用是解析SQL，产生AnalyticResult以及包含所有SQL信息的Analyzer对象，在将分析结果转化为执行计划，大致为产生单节点的计划以及分布式的执行计划。  分布式的执行计划包含了所有的执行信息，封装在了Fragment中，分布式的执行计划是一个有依赖关系的Fragment列表。
+Frontend入口是TExecRequest createExecRequest(TQueryCtx queryCtx, StringBuilder explainString)，这个方法的主要作用是解析SQL，
+产生AnalyticResult以及包含所有SQL信息的Analyzer对象，在将分析结果转化为执行计划，大致为产生单节点的计划以及分布式的执行计划。  
+分布式的执行计划包含了所有的执行信息，封装在了Fragment中，分布式的执行计划是一个有依赖关系的Fragment列表。
 
 SQL处理大致的过程如下：
 Query_ctx-->analysisResult-->TExecrequest-->TQueryExecrequest-->Framents
@@ -31,7 +33,8 @@ private TQueryExecRequest createExecRequest(
 planRoots.add(planner.createPlan().get(0));
 ...
 planner.computeResourceReqs(planRoots, queryCtx, result);
-先调用planner.createPlan()将分析的结果Analyzer转化为转化为执行计划，实际中先生成单节点的执行计划，在转化为分布式的执行计划，计划生成后调用接口对所有的Fragment 内存进行计算。接口为planner.computeResourceReqs(planRoots, queryCtx, result)。
+先调用planner.createPlan()将分析的结果Analyzer转化为转化为执行计划，实际中先生成单节点的执行计划，在转化为分布式的执行计划，
+计划生成后调用接口对所有的Fragment 内存进行计算。接口为planner.computeResourceReqs(planRoots, queryCtx, result)。
 在planner中代码如下：
 public class Planner {
 ...
@@ -97,8 +100,11 @@ initialReservationTotalClaims_ = sink_.getResourceProfile().getMinReservationByt
 }
 Fragment的内存有三部分组成：Sink、Node以及RuntimeFilter；
 初始化的内存为三者的Reservation内存之和；
-计算peak内存峰值，首先要计算执行树的内存：planTreeProfile（包含两部分：duringOpenProfile；postOpenProfile），之后计算Sink的内存消耗，并叠加：fInstancePostOpenProfile= planTreeProfile.postOpenProfile+sink_.getResourceProfile()
-resourceProfile_ 等于已经相加了sink内存的计划树postOpenprofile 与计划树duringOpenprofile的较大值，在累加setMemEstimateBytes(runtimeFiltersReservationBytes_)以及setMinReservationBytes(runtimeFiltersReservationBytes_).build()，实际上是加了runtimefilter的内存。
+计算peak内存峰值，首先要计算执行树的内存：planTreeProfile（包含两部分：duringOpenProfile；postOpenProfile），之后计算Sink的内存消耗，
+并叠加：fInstancePostOpenProfile= planTreeProfile.postOpenProfile+sink_.getResourceProfile()
+resourceProfile_ 等于已经相加了sink内存的计划树postOpenprofile 与计划树duringOpenprofile的较大值，
+在累加setMemEstimateBytes(runtimeFiltersReservationBytes_)以及setMinReservationBytes(runtimeFiltersReservationBytes_).build()，
+实际上是加了runtimefilter的内存。
 计划树两种内存的解释如下：
 /** Peak resources consumed while Open() is executing for this subtree */
     public final ResourceProfile duringOpenProfile;
@@ -164,7 +170,8 @@ perInstanceMemEstimate节点实例内存估计为三者的乘积：最大访问�
 最后在于上限进行修正，去较小值，上限为：
 return (long) RuntimeEnv.INSTANCE.getNumCores() * (long) MAX_THREAD_TOKENS_PER_CORE *
 	        MAX_IO_BUFFERS_PER_THREAD * BackendConfig.INSTANCE.getReadSize();
-所以，单个HDFSScanNode的内存是有文件块最大并发读取线程，每个线程可用的Buffer的数量，以及单词读取数据量的乘积组成，同时根据其他默认值以及参数值进行修正。
+所以，单个HDFSScanNode的内存是有文件块最大并发读取线程，每个线程可用的Buffer的数量，以及单词读取数据量的乘积组成，
+同时根据其他默认值以及参数值进行修正。
 单个节点内存影响的参数为：
 实例可用的内核数：NumCores；
 默认的单核处理的线程数：MAX_THREAD_TOKENS_PER_CORE=3；
@@ -173,7 +180,8 @@ return (long) RuntimeEnv.INSTANCE.getNumCores() * (long) MAX_THREAD_TOKENS_PER_C
 每个节点读取的Block数：perHostScanRanges（不能多于内核数）；
 
 Sink 内存估计：
-Sink用于在Fragment结束时将数据发送给先一个Fragment，根据下一个Fragment的种类不同有不同的实现与默认值，如HdfsTableSink.java，用于写数据到HDFS。实现代码如下：
+Sink用于在Fragment结束时将数据发送给先一个Fragment，根据下一个Fragment的种类不同有不同的实现与默认值，如HdfsTableSink.java，
+用于写数据到HDFS。实现代码如下：
 public void computeResourceProfile(TQueryOptions queryOptions) {
     FeFsTable table = (FeFsTable) targetTable_;
     HdfsFileFormat format = table.getMajorityFormat();
@@ -202,7 +210,8 @@ public void computeResourceProfile(TQueryOptions queryOptions) {
   }
 
 
-实际上，HdfsTableSink的内存是由每个Instance包含的Partition的数量与每个Partition的默认内存相乘后进行修正得到的。partition的默认内存与输出的文件格式相关。
+实际上，HdfsTableSink的内存是由每个Instance包含的Partition的数量与每个Partition的默认内存相乘后进行修正得到的。
+partition的默认内存与输出的文件格式相关。
 
 RuntimeFilter：
 过虑器的大小与Fragment中的Node类型高度相关。
