@@ -1,0 +1,61 @@
+Impala内存管理分为几部分：
+1)	软件层面的内存管理；
+2)	角色内存管理；
+3)	SQL内存规划与管理；
+4)	内存资源队列；
+5)	Impala运行机制对内存的影响；
+
+1 软件层面的内存管理
+在软件层面，定义内存旨在限制Impala有多少可用的内存资源。默认情况下，Impala是不对内存作上限的（C++语言特性决定）。限制Impala总的可用内存有两种方式：
+Impala提供的可用配置的mem_limit参数，设置每个Impala节点可用的内存上限；通过CDH的静态资源池机制，给Impala定义每个节点的可用内存上限。同时，启用静态资源池会覆盖mem_limit参数；
+
+2 Impala角色内存管理
+Impala有三种角色Impalad、catelog、statestore。
+其中catelog是java进程，可通过设置heap大小调节内存的使用量。设置大小时，需要参考实际的内存使用量。内存设置过小，会导致其元数据服务延迟，最直接的影响是Impala执行DDl语句普遍缓慢。
+Impalad是C++进程，但是里面内置了java服务，可通过设置参数JAVA_TOOL_OPTIONS="-Xmx80g"来调整Impalad 的可用Heap大小。实际上，Impalad的Heap只是用来存放元数据相关的信息，SQL执行时不会占用其Heap的空间。
+
+3 SQL内存规划与管理
+Impala 在执行SQL语句是与内存相关的参数包括：mem_limit、mem_estimate（估计内存）、Reservation（预留内存）、实际使用内存。
+Mem_limit指在sql语句中指定的内存，这是单条SQL实际可用的内存上限，作用于所有的Impalad节点。Mem_limit在sql中指定时级别最高，会覆盖掉其他的资源上限设置。
+估计内存，指impala运行SQL任务前，估计的内存使用峰值，以此来申请内存资源。
+
+预留内存，指每个节点初始化时必须的内存大小，当可用的内存小于Reservation时，SQL将无法正常运行，会报内存不够导致组件无法配置的错误（Memory limit exceeded）。
+
+实际内存，运行时实际占用的内存。实际内存会随着可用内存以及内存上限的变化而变化。在内存足够多的情况先程序会占用更多的内存，但是有内存限制是，实际占用内存也会降低。
+
+Impala内存计算：
+默认情况下，请求值为默认估计值乘以执行节点数。
+通过explan 命令可以获取内存内存估计值。
+有mem_limit 时，请求内存为mem_limit * 执行节点数。
+如何获取SQL执行时所需的内存下限。
+实际所需的内存是在运行过程中动态分配的，当可用内存不足以cover所需内存时，会报内存不足错误。
+
+当前可用剩余内存是按实际内存计算，还是以提交SQL的估计内存计算，达到上限会怎样？
+提交时按以分配的内存总量计算剩余的内存值。
+Admission for query exceeded timeout 60000ms in pool root.que_2g. Queued reason: Not enough aggregate memory available in pool root.que_2g with max mem resources 30.00 GB. Needed 21.00 GB but only 16.00 GB was available
+
+当节点的实际可用内存不足以覆盖所需内存时也会报内存不足的错误。
+可用内存可以参考两个上限，SQL mem_limit  ，节点剩余可用内存。
+Memory left in process limit: 112.23 GB
+Memory left in query limit: 124.87 KB
+
+4.	内存资源队列
+Impala  内存资源队列，实际上是Impala的内存管理策略，而是事实上的内存隔离队列。队列规范了SQL的提交与运行机制。
+不同的队列，限制了队列中SQL的运行与排队数量。
+内存在执行时不是完全隔离的，在队列内部，影响SQL运行的因素为：
+1）	当前队列num_runing达到上限，后续SQL就会排队；
+2）	当前队列无可用剩余内存，任务排队。可用剩余内存为max_mem_queue – mem_limit*num_runing;当max_mem_queue 为-1 时，队列内存不设上限。
+CM中监控队列状态的参数包括：
+查看内存使用量：
+select impala_admission_controller_local_backend_mem_usage,impala_admission_controller_local_backend_mem_reserved_across_impala_daemon_pools
+查看Session连接数：
+select total_num_open_beeswax_sessions_across_impalads,total_num_open_hiveserver2_sessions_across_impalads
+查看并发数：
+select impala_admission_controller_local_num_admitted_running,impala_admission_controller_local_num_admitted_running_across_impala_daemon_pools
+
+5 Impala内存管理与SQL运行
+1）DML SQL语句在提交时，Impala会估算执行SQL所需的单节点内存峰值，以及计算运行SQL总的 内存数：total_mem = Est_mem * nodes ,并根据total_mem向admissionContral申请内存资源。数据表计算了统计值（compute state）后est_mem 普遍会变小，更接近实际值。
+2）Impalad保存了全局的元数据，占用了一定的heap大小，导致Impalad用于SQl执行的内存小于Impalad的实际分配值；
+3）impalad可用内存的上限有Impalad级别可SQL级别的mem_limit共同影响；
+4）大量的元数据配置了较小的catelog内存，会因catelog频繁GC，导致DDL语句执行变慢；
+5）如果Impalad没有服务级别的内存上限，Impalad可能将节点的内存全部占用，导致服务运行失败。
