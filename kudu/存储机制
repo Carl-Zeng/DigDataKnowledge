@@ -3,3 +3,5 @@
 3 数据合并
 4 数据恢复
 Tablets that lose a majority of replicas (such as 1 left out of 3) require manual intervention to be repaired.
+leader负责将数据同步到follow节点，确认大多数节点头同步节点完成后才会想客户端确认操作完成。
+
