@@ -1,0 +1,4 @@
+
+1 Kudu写入数据时，优先写到内存中，所以增加内存可以提升kudu的写效率；
+2 Impala 写入kudu时，impala会将大量的数据保存在内存中，缓慢写入kudu，导致Impala节点大量内存被占用。这里所占的是impalad的java  堆内存被占满时，很容易导致其他
+sql任务无法正常编译于规划。增加Impalad 的java内存，可以缓解这个问题。
