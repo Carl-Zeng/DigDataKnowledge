@@ -17,3 +17,7 @@ hive.groupby.skewindata=true
 对于数据来个大的部分单独执行；
 尽可能的采用Map端的join,如拆分左表执行多个独立的任务在合并结果，或者右表拆分后多次关联左表，在将多次结果进行整合;
 
+2 获取元数据信息很慢
+在Mysql中添加索引;
+alter table hive.TAB_COL_STATS ADD INDEX (TABLE_NAME, DB_NAME, COLUMN_NAME);
+
